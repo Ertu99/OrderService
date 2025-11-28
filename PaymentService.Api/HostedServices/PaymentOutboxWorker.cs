@@ -3,6 +3,7 @@ using Microsoft.Extensions.Hosting;
 using PaymentService.Domain.Entities;
 using PaymentService.Infrastructure.Database.Dapper;
 using RabbitMQ.Client;
+using Serilog;
 using System.Text;
 
 namespace PaymentService.Api.HostedServices
@@ -18,6 +19,8 @@ namespace PaymentService.Api.HostedServices
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            Log.Information("🚀 PaymentOutboxWorker started.");
+
             var factory = new ConnectionFactory
             {
                 HostName = "localhost",
@@ -38,7 +41,7 @@ namespace PaymentService.Api.HostedServices
                 cancellationToken: stoppingToken
             );
 
-            Console.WriteLine("📤 PaymentOutboxWorker çalışıyor...");
+            Log.Information("📤 PaymentOutboxWorker is running and monitoring Pending outbox messages...");
 
             while (!stoppingToken.IsCancellationRequested)
             {
@@ -48,7 +51,7 @@ namespace PaymentService.Api.HostedServices
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"❌ PaymentOutboxWorker Hata: {ex.Message}");
+                    Log.Error(ex, "❌ PaymentOutboxWorker exception occurred");
                 }
 
                 await Task.Delay(3000, stoppingToken);
@@ -79,6 +82,7 @@ namespace PaymentService.Api.HostedServices
                         _ => "payment.unknown"
                     };
 
+                    // Publish
                     await channel.BasicPublishAsync(
                         exchange: "payment_exchange",
                         routingKey: routingKey,
@@ -95,11 +99,18 @@ namespace PaymentService.Api.HostedServices
 
                     await conn.ExecuteAsync(update, new { msg.Id });
 
-                    Console.WriteLine($"📨 Payment event yayınlandı | EventType={msg.EventType} | Routing={routingKey}");
+                    Log.Information(
+                        "📨 Payment event published | OutboxId={OutboxId} | EventType={EventType} | RoutingKey={RoutingKey}",
+                        msg.Id, msg.EventType, routingKey
+                    );
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"❌ Publish Hatası: {ex.Message}");
+                    Log.Error(
+                        ex,
+                        "❌ Error publishing outbox event | OutboxId={OutboxId} | EventType={EventType}",
+                        msg.Id, msg.EventType
+                    );
                 }
             }
         }

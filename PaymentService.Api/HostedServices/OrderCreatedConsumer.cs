@@ -5,6 +5,7 @@ using PaymentService.Application.Redis;
 using PaymentService.Application.Services;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using Serilog;
 using System.Text;
 using System.Text.Json;
 
@@ -21,6 +22,9 @@ namespace PaymentService.Api.HostedServices
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+
+            Log.Information("💳 OrderCreatedConsumer started. Listening for order.created events...");
+
             var factory = new ConnectionFactory
             {
                 HostName = "localhost",
@@ -66,21 +70,24 @@ namespace PaymentService.Api.HostedServices
                 cancellationToken: stoppingToken
             );
 
-            Console.WriteLine("💳 PaymentService 'order_events' kuyruğunu (order_exchange/order.created) dinliyor...");
+            Log.Information("📥 OrderCreatedConsumer is now subscribed to 'order_events' queue.");
 
             var consumer = new AsyncEventingBasicConsumer(channel);
 
             consumer.ReceivedAsync += async (sender, ea) =>
             {
+                string json = Encoding.UTF8.GetString(ea.Body.ToArray());
+
                 try
                 {
-                    var json = Encoding.UTF8.GetString(ea.Body.ToArray());
                     var evt = JsonSerializer.Deserialize<OrderCreatedEvent>(json);
 
                     if (evt == null)
                     {
-                        Console.WriteLine("⚠️ OrderCreated event NULL geldi!");
-                        await channel.BasicAckAsync(ea.DeliveryTag, multiple: false, cancellationToken: stoppingToken);
+                        Log.Warning("⚠️ OrderCreated event NULL geldi! DeliveryTag={DeliveryTag}",
+                            ea.DeliveryTag);
+
+                        await channel.BasicAckAsync(ea.DeliveryTag, false, stoppingToken);
                         return;
                     }
 
@@ -89,36 +96,51 @@ namespace PaymentService.Api.HostedServices
                     var cache = scope.ServiceProvider.GetRequiredService<IRedisCacheService>();
 
                     // ==============================
-                    //      IDEMPOTENCY KONTROLÜ
+                    //       IDEMPOTENCY
                     // ==============================
+
                     var idemKey = CacheKeys.PaymentIdempotency(evt.EventId.ToString());
                     var isFirst = await cache.TrySetIdempotencyKeyAsync(idemKey);
 
                     if (!isFirst)
                     {
-                        Console.WriteLine($"⚠️ Duplicate event DROP edildi | EventId={evt.EventId}");
-                        await channel.BasicAckAsync(ea.DeliveryTag, multiple: false, cancellationToken: stoppingToken);
+                        Log.Warning(
+                            "🔁 Duplicate OrderCreated event ignored | EventId={EventId} OrderId={OrderId}",
+                            evt.EventId, evt.OrderId);
+
+                        await channel.BasicAckAsync(ea.DeliveryTag, false, stoppingToken);
                         return;
                     }
 
-                    Console.WriteLine($"🟢 Idempotency OK → İlk event işlendi | EventId={evt.EventId}");
+                    Log.Information(
+                        "🟢 Idempotency passed | EventId={EventId} OrderId={OrderId}",
+                        evt.EventId, evt.OrderId);
 
                     // ==============================
-                    //        NORMAL ÖDEME AKIŞI
+                    //       PROCESS PAYMENT
                     // ==============================
+
                     await paymentService.ProcessPaymentAsync(evt);
 
-                    Console.WriteLine($"💰 Payment işlemi tamamlandı | OrderId={evt.OrderId}");
+                    Log.Information(
+                        "💰 Payment processed successfully | OrderId={OrderId}",
+                        evt.OrderId);
 
-                    await channel.BasicAckAsync(ea.DeliveryTag, multiple: false, cancellationToken: stoppingToken);
+                    await channel.BasicAckAsync(ea.DeliveryTag, false, stoppingToken);
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"❌ PaymentService Hatası: {ex.Message}");
-                    await channel.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: true, cancellationToken: stoppingToken);
+                    Log.Error(
+                        ex,
+                        "❌ Error while processing OrderCreated event | Event JSON={JsonPayload}",
+                        json
+                    );
+
+                    await channel.BasicNackAsync(ea.DeliveryTag, false, true, stoppingToken);
                 }
             };
 
+            // Consumer başlat
             await channel.BasicConsumeAsync(
                 queue: "order_events",
                 autoAck: false,
@@ -126,7 +148,6 @@ namespace PaymentService.Api.HostedServices
                 cancellationToken: stoppingToken
             );
 
-            // Worker sonsuza kadar çalışacak
             await Task.Delay(Timeout.Infinite, stoppingToken);
         }
     }

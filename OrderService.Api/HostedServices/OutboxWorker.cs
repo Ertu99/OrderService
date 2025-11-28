@@ -1,10 +1,11 @@
-﻿using System.Text;
-using System.Text.Json;
+﻿using Dapper;
 using Microsoft.Extensions.Hosting;
-using RabbitMQ.Client;
-using Dapper;
-using OrderService.Infrastructure.Database.Dapper;
 using OrderService.Domain.Entities;
+using OrderService.Infrastructure.Database.Dapper;
+using RabbitMQ.Client;
+using Serilog;
+using System.Text;
+using System.Text.Json;
 
 namespace OrderService.Api.HostedServices
 {
@@ -19,6 +20,8 @@ namespace OrderService.Api.HostedServices
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            Log.Information("📤 OutboxWorker başlatılıyor...");
+
             var factory = new ConnectionFactory
             {
                 HostName = "localhost",
@@ -26,33 +29,36 @@ namespace OrderService.Api.HostedServices
                 Password = "guest"
             };
 
-            // Bağlantı ve kanal
-            await using var connection = await factory.CreateConnectionAsync(stoppingToken);
-            await using var channel = await connection.CreateChannelAsync(cancellationToken: stoppingToken);
-
-            // Sadece EXCHANGE tanımlıyoruz (publisher tarafı)
-            await channel.ExchangeDeclareAsync(
-                exchange: "order_exchange",
-                type: "direct",
-                durable: true,
-                autoDelete: false,
-                arguments: null,
-                cancellationToken: stoppingToken
-            );
-
-            while (!stoppingToken.IsCancellationRequested)
+            try
             {
-                try
+                // Bağlantı ve kanal
+                await using var connection = await factory.CreateConnectionAsync(stoppingToken);
+                await using var channel = await connection.CreateChannelAsync(cancellationToken: stoppingToken);
+
+                Log.Information("📡 RabbitMQ bağlantısı kuruldu (exchange: order_exchange)");
+
+                // Sadece EXCHANGE tanımlıyoruz (publisher tarafı)
+                await channel.ExchangeDeclareAsync(
+                    exchange: "order_exchange",
+                    type: "direct",
+                    durable: true,
+                    autoDelete: false,
+                    arguments: null,
+                    cancellationToken: stoppingToken
+                );
+
+                Log.Information("🔄 OutboxWorker çalışmaya hazır.");
+
+                while (!stoppingToken.IsCancellationRequested)
                 {
                     await ProcessOutboxMessages(channel, stoppingToken);
+                    await Task.Delay(3000, stoppingToken);
                 }
-                catch (Exception ex)
-                {
-                    // TODO: Serilog ekleyince buraya log yazacağız
-                    Console.WriteLine($"[OutboxWorker] Hata: {ex.Message}");
-                }
-
-                await Task.Delay(3000, stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                Log.Fatal(ex, "❌ OutboxWorker fatal error");
+                throw;
             }
         }
 
@@ -63,26 +69,47 @@ namespace OrderService.Api.HostedServices
             using var conn = _context.CreateConnection();
             var messages = await conn.QueryAsync<OutboxMessage>(sql);
 
+            if (!messages.Any())
+                return;
+
             foreach (var msg in messages)
             {
-                var body = Encoding.UTF8.GetBytes(msg.Payload);
+                try
+                {
+                    Log.Information(
+                        "🚀 Outbox mesajı publish ediliyor | OutboxId={OutboxId} | EventType={EventType}",
+                        msg.Id, msg.EventType);
 
-                // Artık DIRECT EXCHANGE'e publish ediyoruz
-                await channel.BasicPublishAsync(
-                    exchange: "order_exchange",
-                    routingKey: "order.created",
-                    mandatory: false,
-                    basicProperties: new BasicProperties(), 
-                    body: body,
-                    cancellationToken: cancellationToken
-                );
+                    var body = Encoding.UTF8.GetBytes(msg.Payload);
 
-                const string updateSql = @"
-                    UPDATE OutboxMessages
-                    SET Status = 'Processed', ProcessedAt = NOW()
-                    WHERE Id = @Id";
+                    // Artık DIRECT EXCHANGE'e publish ediyoruz
+                    await channel.BasicPublishAsync(
+                        exchange: "order_exchange",
+                        routingKey: "order.created",
+                        mandatory: false,
+                        basicProperties: new BasicProperties(),
+                        body: body,
+                        cancellationToken: cancellationToken
+                    );
 
-                await conn.ExecuteAsync(updateSql, new { msg.Id });
+                    const string updateSql = @"
+                        UPDATE OutboxMessages
+                        SET Status = 'Processed', ProcessedAt = NOW()
+                        WHERE Id = @Id";
+
+                    await conn.ExecuteAsync(updateSql, new { msg.Id });
+
+                    Log.Information(
+                        "✅ Outbox mesajı işlendi | OutboxId={OutboxId} | RoutingKey=order.created",
+                        msg.Id);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(
+                        ex,
+                        "❌ Outbox mesajı işlenirken hata oluştu | OutboxId={OutboxId}",
+                        msg.Id);
+                }
             }
         }
     }

@@ -3,6 +3,7 @@ using OrderService.Application.DTOs.Events;
 using OrderService.Application.Interfaces;
 using OrderService.Application.Redis;
 using OrderService.Domain.Entities;
+using Serilog;
 using System.Text.Json;
 
 namespace OrderService.Application.Services
@@ -25,13 +26,19 @@ namespace OrderService.Application.Services
         // ============================================
         public async Task<int> CreateOrderAsync(CreateOrderDto dto, Guid eventId)
         {
+            Log.Information("🚀 OrderService booted successfully at {Time}", DateTime.Now);
+
+
             string idemKey = CacheKeys.OrderIdempotency(eventId.ToString());
 
             // 1) Redis Idempotency Check
             var cachedOrderId = await _cache.GetAsync<int?>(idemKey);
             if (cachedOrderId.HasValue)
             {
-                Console.WriteLine($"⚠️ Idempotent HIT → Returning existing OrderId={cachedOrderId.Value}");
+                Log.Warning(
+                     "Idempotency HIT | Returning existing OrderId={OrderId} | EventId={EventId}",
+                     cachedOrderId.Value, eventId
+                 );
                 return cachedOrderId.Value;
             }
 
@@ -73,7 +80,10 @@ namespace OrderService.Application.Services
 
             await _outboxRepo.AddAsync(outbox);
 
-            Console.WriteLine($"🟢 Order Created → OrderId={orderId} | EventId={eventId}");
+            Log.Information(
+                 "Outbox Message Created | EventType=OrderCreated | OrderId={OrderId} | EventId={EventId}",
+                 orderId, eventId
+                    );
 
             return orderId;
         }
@@ -88,7 +98,10 @@ namespace OrderService.Application.Services
             // 1) Cache Check
             var cached = await _cache.GetAsync<OrderDto>(cacheKey);
             if (cached != null)
+            {
+                Log.Information("Cache HIT | OrderId={OrderId}", id);
                 return cached;
+            }
 
             // 2) DB Query
             var order = await _repo.GetByIdAsync(id);
@@ -106,6 +119,8 @@ namespace OrderService.Application.Services
 
             // 4) Cache Add
             await _cache.SetAbsoluteAsync(cacheKey, dto, 10);
+
+            Log.Information("Cache SET | OrderId={OrderId}", id);
 
             return dto;
         }
@@ -130,7 +145,10 @@ namespace OrderService.Application.Services
         {
             await _repo.UpdateStatusAsync(evt.OrderId, "Cancelled");
 
-            Console.WriteLine($"❌ Order {evt.OrderId} ödeme başarısız → Status = Cancelled");
+            Log.Warning(
+              "Order Payment FAILED | OrderId={OrderId} | Status=Cancelled",
+              evt.OrderId
+          );
 
             // Cache Invalidate
             await _cache.RemoveAsync(CacheKeys.OrderDetails(evt.OrderId));

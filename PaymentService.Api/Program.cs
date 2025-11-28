@@ -5,9 +5,15 @@ using PaymentService.Infrastructure.Cache;
 using PaymentService.Infrastructure.Database.Dapper;
 using PaymentService.Infrastructure.Database.Repositories;
 using RabbitMQ.Client;
+using Serilog;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Serilog setup - Configuration'dan oku (appsettings.json'dan)
+builder.Host.UseSerilog((context, loggerConfig) =>
+    loggerConfig.ReadFrom.Configuration(context.Configuration)
+);
 
 // =======================================
 // CONTROLLERS

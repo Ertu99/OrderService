@@ -5,9 +5,16 @@ using OrderService.Infrastructure.Cache;
 using OrderService.Infrastructure.Database.Dapper;
 using OrderService.Infrastructure.Database.Repositories;
 using RabbitMQ.Client;
+using Serilog;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Serilog setup - Configuration'dan oku (appsettings.json'dan)
+builder.Host.UseSerilog((context, loggerConfig) =>
+    loggerConfig.ReadFrom.Configuration(context.Configuration)
+);
+
 
 // =======================================
 // CONTROLLERS
@@ -37,7 +44,8 @@ builder.Services.AddSingleton(sp =>
     {
         HostName = "localhost",
         UserName = "guest",
-        Password = "guest"
+        Password = "guest",
+        
     };
 });
 

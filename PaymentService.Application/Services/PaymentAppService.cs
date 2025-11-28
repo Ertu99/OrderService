@@ -2,6 +2,7 @@
 using PaymentService.Application.Interfaces;
 using PaymentService.Application.Redis;
 using PaymentService.Domain.Entities;
+using Serilog;
 using System.Text.Json;
 
 namespace PaymentService.Application.Services
@@ -26,6 +27,12 @@ namespace PaymentService.Application.Services
         // ===========================================================
         public async Task ProcessPaymentAsync(OrderCreatedEvent evt)
         {
+            Log.Information("💳 PaymentService booted successfully at {Time}", DateTime.Now);
+
+            Log.Information(
+               "💳 Payment process started | OrderId={OrderId} | Amount={Amount}",
+               evt.OrderId, evt.TotalAmount);
+
             bool isSuccess = Random.Shared.Next(0, 100) >= 30; // %70 success
 
             if (isSuccess)
@@ -42,6 +49,11 @@ namespace PaymentService.Application.Services
                     },
                     minutes: 30
                 );
+
+                Log.Information(
+                    "🧩 Payment result cached | OrderId={OrderId} | Status=PaymentSucceeded",
+                    evt.OrderId
+                );
             }
             else
             {
@@ -56,6 +68,10 @@ namespace PaymentService.Application.Services
                     },
                     minutes: 30
                 );
+                Log.Warning(
+                   "🧩 Payment result cached | OrderId={OrderId} | Status=PaymentFailed",
+                   evt.OrderId
+                    );
             }
         }
 
@@ -74,6 +90,11 @@ namespace PaymentService.Application.Services
             };
 
             await _paymentRepo.AddAsync(payment);
+
+            Log.Information(
+               "💰 Payment SUCCESS → DB inserted | OrderId={OrderId} | Amount={Amount}",
+               evt.OrderId, evt.TotalAmount
+           );
 
             // 2) Event
             var successEvent = new PaymentSucceededEvent
@@ -95,7 +116,10 @@ namespace PaymentService.Application.Services
 
             await _outboxRepo.AddAsync(outbox);
 
-            Console.WriteLine($"🟢 Payment SUCCESS → Order={evt.OrderId}, Amount={evt.TotalAmount}");
+            Log.Information(
+             "📤 Outbox event created | Type=PaymentSucceeded | OrderId={OrderId}",
+             evt.OrderId
+         );
         }
 
         // ===========================================================
@@ -113,6 +137,11 @@ namespace PaymentService.Application.Services
             };
 
             await _paymentRepo.AddAsync(payment);
+
+            Log.Warning(
+               "❌ Payment FAIL → DB inserted | OrderId={OrderId}",
+               evt.OrderId
+           );
 
             // 2) Event
             var failEvent = new PaymentFailedEvent
@@ -134,7 +163,10 @@ namespace PaymentService.Application.Services
 
             await _outboxRepo.AddAsync(outbox);
 
-            Console.WriteLine($"❌ Payment FAIL → Order={evt.OrderId}");
+            Log.Warning(
+                "📤 Outbox event created | Type=PaymentFailed | OrderId={OrderId}",
+                evt.OrderId
+            );
         }
     }
 

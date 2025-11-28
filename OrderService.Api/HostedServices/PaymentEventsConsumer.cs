@@ -1,10 +1,11 @@
 ﻿using Microsoft.Extensions.Hosting;
-using RabbitMQ.Client;
-using RabbitMQ.Client.Events;
-using System.Text;
-using System.Text.Json;
 using OrderService.Application.DTOs.Events;
 using OrderService.Application.Services;
+using RabbitMQ.Client;
+using RabbitMQ.Client.Events;
+using Serilog;
+using System.Text;
+using System.Text.Json;
 
 namespace OrderService.Api.HostedServices
 {
@@ -19,6 +20,8 @@ namespace OrderService.Api.HostedServices
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            Log.Information("📥 PaymentEventsConsumer başlatılıyor...");
+
             var factory = new ConnectionFactory
             {
                 HostName = "localhost",
@@ -67,41 +70,60 @@ namespace OrderService.Api.HostedServices
                 cancellationToken: stoppingToken
             );
 
-            Console.WriteLine("🧾 OrderService → Payment events dinleniyor...");
+            Log.Information("📥 OrderService → Payment events dinleniyor...");
 
             var consumer = new AsyncEventingBasicConsumer(channel);
 
             consumer.ReceivedAsync += async (sender, ea) =>
             {
+                var json = Encoding.UTF8.GetString(ea.Body.ToArray());
+                string routingKey = ea.RoutingKey;
+
+                Log.Information(
+                    "📨 Payment event alındı | RoutingKey={RoutingKey} | Size={Size}B",
+                    routingKey, json.Length
+                );
+
                 try
                 {
-                    var json = Encoding.UTF8.GetString(ea.Body.ToArray());
-
                     using var scope = _scopeFactory.CreateScope();
                     var service = scope.ServiceProvider.GetRequiredService<OrderAppService>();
 
-                    if (ea.RoutingKey == "payment.succeeded")
+                    if (routingKey == "payment.succeeded")
                     {
                         var evt = JsonSerializer.Deserialize<PaymentSucceededEvent>(json);
+
                         if (evt != null)
+                        {
+                            Log.Information("💰 Payment Succeeded | OrderId={OrderId}", evt.OrderId);
                             await service.HandlePaymentSucceededAsync(evt);
+                        }
                     }
-                    else if (ea.RoutingKey == "payment.failed")
+                    else if (routingKey == "payment.failed")
                     {
                         var evt = JsonSerializer.Deserialize<PaymentFailedEvent>(json);
+
                         if (evt != null)
+                        {
+                            Log.Warning("❌ Payment Failed | OrderId={OrderId}", evt.OrderId);
                             await service.HandlePaymentFailedAsync(evt);
+                        }
                     }
                     else
                     {
-                        Console.WriteLine($"⚠ Bilinmeyen routing key: {ea.RoutingKey}");
+                        Log.Warning("⚠ Bilinmeyen routing key alındı: {RoutingKey}", routingKey);
                     }
 
                     await channel.BasicAckAsync(ea.DeliveryTag, false, stoppingToken);
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"❌ PaymentEventsConsumer HATA: {ex.Message}");
+                    Log.Error(
+                        ex,
+                        "❌ PaymentEventsConsumer hata aldı | RoutingKey={RoutingKey}",
+                        routingKey
+                    );
+
                     await channel.BasicNackAsync(ea.DeliveryTag, false, true, stoppingToken);
                 }
             };
@@ -113,6 +135,7 @@ namespace OrderService.Api.HostedServices
                 cancellationToken: stoppingToken
             );
 
+            // Worker sonsuz döngüde kalır
             await Task.Delay(Timeout.Infinite, stoppingToken);
         }
     }
